@@ -3,7 +3,7 @@
 ; Filenaam: CD-Pro2M_main.ASM    (version for MPASM)                          *
 ;******************************************************************************
 ;
-;   LAST MODIFICATION:  12.08.2007
+;   LAST MODIFICATION:  05.19.2008
 ;
 ;******************************************************************************
 ;   VERSION HISTORY                                                           *
@@ -11,6 +11,7 @@
 ;
 ;   Version		Date		Remark
 ;	1.00		09/20/2006	Initial release
+;	1.01		05/20/2007	Sensorless build option
 ;
 ;__ END VERSION HISTORY _______________________________________________________
 ;       
@@ -29,8 +30,14 @@
 
 	variable debug = 0				;set when used with ICSP for debugging
 	variable displayDSA = 0			;set to display all DSA response
+	variable sensorless = 1			;set to build a sensorless (cover) version
 
 	__CONFIG _CP_OFF & _WDT_OFF & _BODEN_OFF & _PWRTE_ON &  _HS_OSC & _LVP_OFF & _DEBUG_OFF & _CPD_OFF
+
+
+	if (sensorless == 1)
+	   messg "You are building a Sensorless code version"
+	endif
 
 
 ;----------------------------------------------------------------------------
@@ -426,10 +433,12 @@ init:
 	call	waitForDSAresponce
 
 _skipDACmode
-	btfss	COVER_CLOSED		;if cover is closed
-	goto	_fireUp
-	bsf		LED_LIGHT			;turn on the LED lighting
-	goto	main
+	if sensorless == 0
+		btfss	COVER_CLOSED		;if cover is closed
+		goto	_fireUp
+		bsf		LED_LIGHT			;turn on the LED lighting
+		goto	main
+	endif
 
 _fireUp:
 	call	readTOC				;spin-up the disc, read TOC and
@@ -722,12 +731,16 @@ _store:
 ; Reg. Changed: -
 ; -------------------------------------------------------------
 manMoveCover:
-	btfss	KEYS_RELEASED,OPEN_CLOSE
+	if sensorless == 0			;in the sensorless version the open/close button is completely ignored
+		btfss	KEYS_RELEASED,OPEN_CLOSE
+	endif
 	return
 	goto	moveCover
 
 rcMoveCover:
-	btfss	RC5_TOGGLED
+	if sensorless == 0			;in the sensorless version the open/close button is completely ignored
+		btfss	RC5_TOGGLED
+	endif
 	return
 
 moveCover:
@@ -796,7 +809,6 @@ _isClosed:
 	bsf		ACT_STOP
 	return
 
-
 ; -------------------------------------------------------------
 ; Description: Actions
 ;
@@ -811,19 +823,40 @@ manPlayTitle:
 playTitle:
 	btfss	RC5_TOGGLED
 	return
+
 _playTitle:
-	btfss	COVER_CLOSED
-	goto	_playTitleClosed
-	bsf		ACT_PLAY			;start to play when cover is closed
-	goto	closeCover
+	if sensorless == 0
+		btfss	COVER_CLOSED
+		goto	_playTitleClosed
+		bsf		ACT_PLAY			;start to play when cover is closed
+		goto	closeCover
 _playTitleClosed:
+	endif
+
 	btfss	ACT_VALIDATE_TOC	;if TOC read is not completed
 	goto	_playTitleTOCcheck
 	bsf		ACT_PLAY			;set PLAY action bit
 	bcf		ACT_STOP			;and clear STOP action bit
+
+	if sensorless == 1
+		return
+	endif
+
 _playTitleTOCcheck:
-	btfss	TOC_VALID
-	return
+
+	if sensorless == 0
+		btfss	TOC_VALID
+		return	
+	else
+		bsf		ACT_PLAY
+		btfsc	TOC_VALID
+		goto	_playTitle_sensorless
+		call	lcd_clr				;clear the display	
+		movlw	0x49				;send "Reading disk" to LCD (see LCD_stings.asm)
+	 	call	displayString		;line.position 1.0
+		goto	readTOC				;spin-up the disc and read TOC
+_playTitle_sensorless:
+	endif
 
 	bcf		ACT_PLAY			;clear action "play" bit
 
@@ -902,6 +935,20 @@ _stopDisc:
 	movlw	0x00				;parameter xx
 	movwf	DSA_PARAM
 	call	sendDSACommand
+	call	waitForDSAresponce
+	
+	if	sensorless == 1
+		clrf	ACTIONS				;abort all actions
+		call	lcd_clr				;clear the display
+		movlw	0x24				;send "Insert disc" to LCD (see LCD_stings.asm)
+		call	displayString
+		movlw	.250				;
+		call	ms_delay			;wait 250ms
+		movlw	.250				;
+		call	ms_delay			;wait 250ms
+		goto	clearTOC
+	endif
+
 	goto	displayDiscInfo
 ;	return
 
@@ -914,8 +961,10 @@ playNextTitle:
 	btfss	RC5_TOGGLED
 	return
 _playNextTitle:
+	if sensorless == 0
 	btfsc	COVER_CLOSED		;ignore
 	return						;when cover not closed
+	endif
 	btfss	TOC_VALID			;or
 	return						;TOC is not valid
 ;
@@ -955,9 +1004,11 @@ manPrevTitle:
 playPrevTitle:
 	btfss	RC5_TOGGLED
 	return
-_playPrevTitle:	
+_playPrevTitle:
+	if sensorless == 0
 	btfsc	COVER_CLOSED		;ignore
 	return						;when cover not closed
+	endif
 	btfss	TOC_VALID			;or
 	return						;TOC is not valid
 
@@ -1902,7 +1953,8 @@ _commandTable:
 	goto	rcKey_8
 	goto	rcKey_9
 	retlw	.10
-	goto	timeMode
+	retlw	.11
+;	goto	timeMode
 	goto	standby
 	retlw	.13
 	retlw	.14

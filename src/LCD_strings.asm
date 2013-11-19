@@ -62,6 +62,7 @@ string_table
 	dt	"Insert disc^"			;0x24
 	dt	"No disc^"				;0x30
 	dt	" Bergrans CDP-1 ^"		;0x38
+;	dt	"Your display txt^"		;0x38
 	dt	"Reading disc^"			;0x49
 	dt	"Opening^"				;0x56
 	dt	"Closing^"				;0x5E
