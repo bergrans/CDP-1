@@ -3,7 +3,7 @@
 ; Filenaam: CD-Pro2M_main.ASM    (version for MPASM)                          *
 ;******************************************************************************
 ;
-;   LAST MODIFICATION:  10.26.2006
+;   LAST MODIFICATION:  12.08.2007
 ;
 ;******************************************************************************
 ;   VERSION HISTORY                                                           *
@@ -59,7 +59,6 @@
 	CONSTANT	TIMEOUT_VAL		= .60		;value to tune timeout TMR0 to 10ms units
 	CONSTANT	RC5_SYSTEM		= .20		;RC5 system number (20 for CD player)
 	CONSTANT	SCAN_TIME		= .15		;Introscan time in seconds
-	CONSTANT	EOS_CHAR		= '^'		;character to indicate the end of the string
 
 
 ;----------------------------------------------------------------------------
@@ -121,6 +120,8 @@ TOC_STATUS		res 1
 TIMEOUT_TIME	res 1			;time counter register
 RC5L			res 1			;lower received byte
 RC5H			res 1			;higher received byte
+RC5L_BF			res 1			;lower received byte
+RC5H_BF			res 1			;higher received byte
 RC5_BITCOUNT	res 1			;counter for RC5
 MIN_TITLE		res 1
 MAX_TITLE		res 1
@@ -139,8 +140,13 @@ ACTIONS			res	1
 TIMEOUT_COUNT	res 1
 DACMODE			res	1
 DISC_INFO		res 1			;contains "Get Disc Status" data returned by CD-Pro2M
+PROG_LENGTH		res 1			;length of programmed track list
+PROG_POINTER	res 1			;pointer for the programmed track list
+
 	GLOBAL	FLAGS_0
 
+track_list	UDATA_SHR	0x0A0
+TRACK_LIST		res 20			;list for programmed tracks (32 bytes A0h..BFh)
 
 ;----------------------------------------------------------------------------
 ; Bit definitions
@@ -157,13 +163,14 @@ DISC_INFO		res 1			;contains "Get Disc Status" data returned by CD-Pro2M
 #define		SEARCHTIMEOUT		FLAGS_0,7		;bit indicates search timeout
 
 #define		REM_TIME			FLAGS_1,0		;bit indicates "remaining track time" is to be displayed
-;#define		POWER_SW_RELEASED	FLAGS_1,1		;bit indicates has been released
 
 #define		RC5_TOGGLE			RC5_FLAGS,0		;bit indicates RC5 toggle bit
 #define		RC5_TOGGLED			RC5_FLAGS,1		;bit indicates RC5 toggle bit has changed
 #define		RC5_VALID			RC5_FLAGS,2		;bit indicates RC5 commans is valid
 #define		RC5_RECEIVED		RC5_FLAGS,3		;bit indicates RC5 command is received
 #define		RC5_FIRST			RC5_FLAGS,4		;bit indicates first RC5 command after power-up
+#define		RC5_BIFACE			RC5_FLAGS,5		;bit indicates next RC5 sample is the biface (second) part of the bit.
+#define		RC5_STARTED			RC5_FLAGS,6		;bit indicates RC5 bit-train has started
 
 #define		PLAYING				DISC_STATUS,0
 #define		PAUSED				DISC_STATUS,1
@@ -172,6 +179,7 @@ DISC_INFO		res 1			;contains "Get Disc Status" data returned by CD-Pro2M
 #define		REPEAT				DISC_STATUS,4
 #define		SEARCHING_FWRD		DISC_STATUS,5
 #define		SEARCHING_BWRD		DISC_STATUS,6
+#define		PROGRAM				DISC_STATUS,7
 
 #define		TOC_TITLE_MIN		TOC_STATUS,0	;bit indicates <minimum Track number of the CD> is set
 #define		TOC_TITLE_MAX		TOC_STATUS,1	;bit indicates <miximum Track number of the CD> is set
@@ -211,7 +219,6 @@ STARTUP	CODE					;place code at reset vector
 ; Start code (This code executes when a reset occurs)
 ; -------------------------------------------------------------
 	clrf    PCLATH				;select program memory page 0
-;	goto	powerDown
 	goto    init				;go to beginning of program
 	nop
 	nop
@@ -234,7 +241,7 @@ STARTUP	CODE					;place code at reset vector
 	btfss	INTCON,INTE
 	goto	_checkTMR1Int
 	btfsc	INTCON,INTF
-	goto	_RC5start
+	goto	_RC5sync
 
 _checkTMR1Int:
 	Bank1
@@ -248,7 +255,7 @@ _chechTMR2Int:
 	btfss	PIE1,TMR2IE
 	goto	_chechTMR0Int
 	Bank0
-	btfsc	PIR1,TMR1IF
+	btfsc	PIR1,TMR1IF			;?
 	goto	_searchTimeout
 
 _chechTMR0Int:
@@ -268,45 +275,67 @@ _timeoutNext
 	goto	_endInt
 
 _RC5timeout
-	movlw	0xEE
-	movwf	TMR1H				;reset Timer1 for a timeout of 1.8ms
-	movlw	0x7B
-	movwf	TMR1L
+	movlw	0x4E
+	movwf	TMR1L					;reset Timer1 for a timeout of 0.890ms
+	movlw	0xF7
+	movwf	TMR1H
+
+	btfsc	RC5_BIFACE
+	goto	_RC5biface
+	nop
 	bcf		STATUS,C
-	btfss	RC5	
+	btfsc	RC5	
 	bsf		STATUS,C
 	rlf		RC5L,F
 	rlf		RC5H,F
-	bcf		PIR1,TMR1IF			;clear Timer1 interrupt flag
+	bsf		RC5_BIFACE
+	goto	_RC5timeoutEnd
+_RC5biface:
+	bcf		STATUS,C
+	btfsc	RC5
+	bsf		STATUS,C
+	rlf		RC5L_BF,F
+	rlf		RC5H_BF,F
+	bcf		RC5_BIFACE
+_RC5timeoutEnd:
+	bcf		PIR1,TMR1IF				;clear Timer1 interrupt flag
 	decfsz	RC5_BITCOUNT,F
 	goto	_endInt
 	Bank1
-	bcf		PIE1,TMR1IE			;disable Timer1 interrupt
+	bcf		PIE1,TMR1IE				;disable Timer1 interrupt
 	Bank0
 	bsf		RC5_RECEIVED
 	goto	_endInt
 
-_RC5start
-	clrf	RC5H
-	clrf	RC5L
-	movlw	.14
-	movwf	RC5_BITCOUNT
-	bcf		STATUS,C
-	btfss	RC5	
-	bsf		STATUS,C
-	rlf		RC5L,F
-	rlf		RC5H,F
-	decf	RC5_BITCOUNT,F
-	movlw	0xEA
-	movwf	TMR1H				;reset Timer1 for a timeout of 2.25ms
-	movlw	0x30
+_RC5sync
+	movlw	0xC0					;sync Timer1 for a timeout of 435ms (halfway the bit period)
 	movwf	TMR1L
-	bcf		PIR1,TMR1IF			;clear Timer1 interrupt flag
-	Bank1
-	bsf		PIE1,TMR1IE			;enable Timer1 interrupt
+	movlw	0xFB
+	movwf	TMR1H
+
+	btfsc	RC5_STARTED				;if RC5 bit-train has already started
+	goto	_RC5syncEnd				;only sync the timer
+
+	clrf	RC5H					;clear both RC5 receive registers
+	clrf	RC5L					;
+	movlw	.255					;
+	movwf	RC5H_BF					;and set both RC5 biphase registers
+	movwf	RC5L_BF					;
+
+	bsf		RC5L,0					;set the first pahse of tye first start bit to "1"
+	movlw	.27						;still 13.5 bits (27 bifase samples)
+	movwf	RC5_BITCOUNT			;to go
+	bsf		RC5_BIFACE				;first sample will be a bifase sample
+
+	Bank1	
+	bsf		PIE1,TMR1IE				;enable Timer1 interrupt
 	Bank0
 	bsf		INTCON,PEIE
-	bcf		INTCON,INTE			;disable RB0 interrupt
+	bsf		RC5_STARTED
+
+_RC5syncEnd:
+	bcf		PIR1,TMR1IF				;clear Timer1 interrupt flag
+	bcf		INTCON,INTF				;clear the interrupt flag (RB0/INT = RC5 input)
 	goto	_endInt
 
 _searchTimeout:
@@ -395,9 +424,14 @@ init:
 	movwf	DSA_PARAM
 	call	sendDSACommand
 	call	waitForDSAresponce
+
 _skipDACmode
-	btfsc	COVER_CLOSED		;if cover is closed
-	goto	main				;
+	btfss	COVER_CLOSED		;if cover is closed
+	goto	_fireUp
+	bsf		LED_LIGHT			;turn on the LED lighting
+	goto	main
+
+_fireUp:
 	call	readTOC				;spin-up the disc, read TOC and
 	bsf		ACT_PLAY			;start playing
 
@@ -544,6 +578,7 @@ standby:
 	call	waitForDSAresponce
 
 powerDown:
+	bcf		LED_LIGHT			;turn off the LED lighting
 	bcf		RELAY_9V_CDPro		;turn off the CD-Pro2M 9V
 	movlw	.250				;
 	call	ms_delay			;wait another 250ms
@@ -566,7 +601,7 @@ goToSleep:
 	clrf	INTCON				;disable all interrups
 	bsf		INTCON, GIE
 
-	movlw	.30					;load 300ms
+	movlw	.10					;load 100ms
 	call	startTimeout		;start timeout timer
 _powerUpLoop
 	btfsc	KEY_COL_3			;checking the POWER button
@@ -592,6 +627,29 @@ newDisc:
 	clrf	DISC_MINUTES
 	clrf	DISC_SECONDS
 	clrf	DISC_FRAMES
+	clrf	PROG_LENGTH
+
+	call	clearProgramList
+	return
+
+
+; -------------------------------------------------------------
+; Description: Clears program list RAM area (0h0A0...0h0BF)
+;
+; Reg. IN:		-
+; Reg. OUT:		-
+; Reg. Changed: COUNTER, FSR
+; -------------------------------------------------------------
+clearProgramList:
+	movlw	.32
+	movwf	COUNTER
+	movlw	TRACK_LIST
+	movwf	FSR
+_clearProgramLoop:
+	clrf	INDF
+	incf	FSR,F
+	decfsz	COUNTER,F
+	goto	_clearProgramLoop
 	return
 
 
@@ -667,53 +725,54 @@ manMoveCover:
 	btfss	KEYS_RELEASED,OPEN_CLOSE
 	return
 	goto	moveCover
+
 rcMoveCover:
 	btfss	RC5_TOGGLED
 	return
+
 moveCover:
-	bcf		COVER_DIR
-	bcf		MOTOR_STEP
+	bcf		MOTOR_DIR
+	bcf		MOTOR_ENABLE
 
-	btfss	COVER_CLOSED		;is closed?
-	goto	openCover
-	goto	closeCover
-
-openCover:
+	btfsc	COVER_CLOSED		;if cover is not closed
+	goto	closeCover			;then close
+								;else open
 	movlw	0x02				;opcode "Stop" parameter xx
 	movwf	DSA_OPCODE
 	call	sendDSACommand
 	call	waitForDSAresponce
 
-	clrf	ACTIONS
+	clrf	ACTIONS				;abort all actions
 
-	call	lcd_clr
+	call	lcd_clr				;clear the display
 	movlw	0x56				;send "Opening" to LCD (see LCD_stings.asm)
 	call	displayString
 
-	bsf		COVER_DIR			;set motor direction to CW (open)
-	goto	_moveCover
+	bsf		MOTOR_DIR			;set motor direction to CW (open)
+	goto	_move
 
 closeCover:
-	bcf		COVER_DIR			;set motor direction to CCW (close)
-	bsf		MOTOR_STEP
+	bcf		LED_LIGHT			;turn off the LED lighting
+	bcf		MOTOR_DIR			;set motor direction to CCW (close)
+	bsf		MOTOR_ENABLE
 
 	call	lcd_clr
 	movlw	0x5E				;send "Closing" to LCD (see LCD_stings.asm)
 	call	displayString
 
-_moveCover:
-	btfss	COVER_DIR			;check direction
+_move:
+	btfss	MOTOR_DIR			;check direction
 	goto	_testIfClosed		;if closing check if "closed" endswitch
 	btfsc	COVER_OPEN			;if opening check if "opened" endswitch
-	goto	_moveCover
+	goto	_move
 	goto	_endMove			;end movement at if sensor is activated
 _testIfClosed
 	btfsc	COVER_CLOSED
-	goto	_moveCover
+	goto	_move
 
 _endMove
-	bsf		COVER_DIR			;hit the brake
-	bsf		MOTOR_STEP			;
+	bsf		MOTOR_DIR			;hit the brake
+	bsf		MOTOR_ENABLE		;
 
 	call	lcd_clr	
 
@@ -726,6 +785,7 @@ _isOpen:
 	movlw	0x24				;send "Insert disc" to LCD (see LCD_stings.asm)
 	call	displayString
 	call	clearTOC
+	bsf		LED_LIGHT			;turn on the LED lighting
 	return
 
 _isClosed:
@@ -767,6 +827,22 @@ _playTitleTOCcheck:
 
 	bcf		ACT_PLAY			;clear action "play" bit
 
+	btfss	PROGRAM
+	goto	_playThatTitle
+
+	movlw	0x15				;opcode "Set mode"
+	movwf	DSA_OPCODE
+	movlw	b'01100001'			;speed=1, mode=audio, ATTI=10b, pause at track-end=1
+	movwf	DSA_PARAM
+	call	sendDSACommand
+
+	movlw	TRACK_LIST			;set pointer to first track
+	movwf	PROG_POINTER		;of the program list
+	movwf	FSR
+	movfw	INDF
+	movwf	SET_TITLE
+
+_playThatTitle:
 	movfw	SET_TITLE
 	subwf	ACTUAL_TITLE,W
 	btfss	STATUS,Z
@@ -842,20 +918,34 @@ _playNextTitle:
 	return						;when cover not closed
 	btfss	TOC_VALID			;or
 	return						;TOC is not valid
-
+;
+	btfsc	PLAYING
+	btfss	PROGRAM
+	goto	_playNextCheck
+	incf	PROG_POINTER, F
+	movfw	PROG_POINTER
+	movwf	FSR
+	movfw	INDF
+	movwf	SET_TITLE
+	goto	_playNextNow
+;
+_playNextCheck:
 	movfw	MAX_TITLE
 	subwf	SET_TITLE,W
 	btfsc	STATUS,Z			;skip if actual title is equal max title
 	return
 	incf	SET_TITLE,F
 
+_playNextNow:
 	movlw	.6
 	call	cursor_pos_line2
 	movfw	SET_TITLE
 	bcf		LEADINGZERO
 	call	displayNumber
+	btfss	PLAYING
+	btfss	PROGRAM
 	goto	_play
-;	return
+	return
 
 ; -------------------------------------------------------------
 manPrevTitle:
@@ -871,14 +961,23 @@ _playPrevTitle:
 	btfss	TOC_VALID			;or
 	return						;TOC is not valid
 
+	movf	SET_TITLE,F
+	btfsc	STATUS,Z			;if actual track is '0'
+	return						;return
+
 	decf	SET_TITLE,W
 	btfsc	STATUS,Z			;if actual track is '1'
 	goto	_playPrev			;restart the track
 
 	movwf	SET_TITLE
-	movf	ACTUAL_MINUTES,F
-	btfss	STATUS,Z
+	btfsc	PROGRAM
 	goto	_playPrev
+	movf	ACTUAL_MINUTES,F
+	btfsc	STATUS,Z			;if "minutes" == 0
+	goto	_checkSeconds		;check "seconds"
+	incf	SET_TITLE,F			;else restart actual track
+	goto	_playPrev
+_checkSeconds
 	movf	ACTUAL_SECONDS,F	;if actual time <0:01
 	btfss	STATUS,Z			;play previous track
 	incf	SET_TITLE,F			;else restart actual track
@@ -893,11 +992,15 @@ _playPrev:
 	movfw	SET_TITLE
 	bcf		LEADINGZERO
 	call	displayNumber
+	btfss	PROGRAM
 	goto	_play
-;	return
+	return
 
 ; -------------------------------------------------------------
 searchForward:
+	btfss	PLAYING
+	return
+
 	btfsc	SEARCHING_FWRD
 	goto	startSearchTimeout	;start the timeout timer
 
@@ -913,6 +1016,9 @@ searchForward:
 
 ; -------------------------------------------------------------
 searchBackward:
+	btfss	PLAYING
+	return
+
 	btfsc	SEARCHING_BWRD
 	goto	startSearchTimeout	;(re)start the timeout timer
 
@@ -944,12 +1050,70 @@ _releaseRepeat:
 	bcf		REPEAT
 	goto	displayAction
 ;	return
+
+; -------------------------------------------------------------
+programDisc
+	btfss	RC5_TOGGLED
+	return
+	btfss	TOC_VALID
+	return
+	btfsc	PLAYING
+	return
+
+	btfsc	PROGRAM
+	goto	_nextTrackProgram
+
+	bsf		PROGRAM
+	clrf	PROG_LENGTH
+	clrf	SET_TITLE
+;	movlw	TRACK_LIST			;set pointer to first track
+;	movwf	PROG_POINTER		;of the program list
+
+_nextTrackProgram:
+	call	lcd_clr_line1
+	movlw	.0
+	call	cursor_pos_line1
+	movlw	0x74				;send "Program" to LCD (see LCD_stings.asm)
+	call	displayString
+	movlw	' ';
+	call	lcd_character
+
+	movf	SET_TITLE, F
+	btfsc	STATUS, Z
+	goto	_clearTrackNr
+	movlw	TRACK_LIST
+	addwf	PROG_LENGTH,W
+	movwf	FSR
+	movfw	SET_TITLE
+	movwf	INDF
+	incf	PROG_LENGTH,F
+	clrf	SET_TITLE
+
+	movfw	PROG_LENGTH
+	bcf		LEADINGZERO
+	call	displayNumber
+
+_clearTrackNr:
+	call	lcd_clr_line2
+	movlw	.0
+	call	cursor_pos_line2
+	movlw	0x0B				;send "track" to LCD (see LCD_stings.asm)
+	call	displayString
+
+	movlw	' ';
+	call	lcd_character
+	movlw	'-';
+	call	lcd_character
+	movlw	'-';
+	call	lcd_character
+
+	return
 	
 ; -------------------------------------------------------------
 introScan:
 	btfss	RC5_TOGGLED
 	return
-_introScan:
+
 	btfsc	INTROSCAN
 	goto	_releaseIntroScan
 
@@ -1253,58 +1417,68 @@ _us_delay:
 ; Reg. Changed: RC5H, RC5L, TEMP, RC5_FLAGS
 ; -------------------------------------------------------------
 validateRC5command:
-	bcf		RC5_VALID			;clear "valid RC5 command" flag
+	bcf		RC5_VALID				;clear "valid RC5 command" flag
 	
-	btfss	RC5H,5				;check S1 (startbit)
-	goto	_resetRC5			;invalid command exit
-	btfss	RC5H,4				;check S2 (startbit)
-	goto	_resetRC5			;invalid command exit
+	comf	RC5H,W					;
+	xorwf	RC5H_BF,W				;check if the bifase bit states
+	btfss	STATUS,Z				;are complementary (upper byte)
+	goto	_resetRC5				;
+	comf	RC5L,W					;
+	xorwf	RC5L_BF,W				;check if the bifase bit states
+	btfss	STATUS,Z				;are complementary (lower byte)
+	goto	_resetRC5				;
 
-	rlf		RC5L,F				;
-	rlf		RC5H,F				;
-	rlf		RC5L,F				;split RC5 sting
-	rlf		RC5H,F				;S1, S2, Toggle and System to RC5H
-	bcf		STATUS,C			;Command to RC5L
-	rrf		RC5L,F				;
-	bcf		STATUS,C			;
-	rrf		RC5L,F				;
+	btfss	RC5H,5					;check S1 (startbit)
+	goto	_resetRC5				;invalid command exit
+	btfss	RC5H,4					;check S2 (startbit)
+	goto	_resetRC5				;invalid command exit
 
-	movfw	RC5H				;
-	andlw	b'00011111'			;
-	sublw	RC5_SYSTEM			;check for valid System (CD player)
-	btfss	STATUS,Z			;
-	goto	_resetRC5			;invalid command exit
+	rlf		RC5L,F					;
+	rlf		RC5H,F					;
+	rlf		RC5L,F					;split RC5 sting
+	rlf		RC5H,F					;S1, S2, Toggle and System to RC5H
+	bcf		STATUS,C				;Command to RC5L
+	rrf		RC5L,F					;
+	bcf		STATUS,C				;
+	rrf		RC5L,F					;
+
+	movfw	RC5H					;
+	andlw	b'00011111'				;
+	sublw	RC5_SYSTEM				;check for valid System (CD player)
+	btfss	STATUS,Z				;
+	goto	_resetRC5				;invalid command exit
 
 _checkRange
-	movlw	b'11000000'			;
-	andwf	RC5L,W				;check if command is within the range 0..63
-	btfss	STATUS,Z			;
-	goto	_resetRC5			;invalid command exit
+	movlw	b'11000000'				;
+	andwf	RC5L,W					;check if command is within the range 0..63
+	btfss	STATUS,Z				;
+	goto	_resetRC5				;invalid command exit
 
-	bsf		RC5_VALID			;set "valid RC5 command" flag
+	bsf		RC5_VALID				;set "valid RC5 command" flag
 
-	bcf		RC5_TOGGLED			;
-	btfss	RC5_TOGGLE			;
-	goto	_toggleWasLow		;
-	btfss	RC5H,5				;check if Toggle bit has toggled
-	bsf		RC5_TOGGLED			;
-	goto	_copyToggleBit		;
-_toggleWasLow					;
-	btfsc	RC5H,5				;
-	bsf		RC5_TOGGLED			;
+	bcf		RC5_TOGGLED				;
+	btfss	RC5_TOGGLE				;
+	goto	_toggleWasLow			;
+	btfss	RC5H,5					;check if Toggle bit has toggled
+	bsf		RC5_TOGGLED				;
+	goto	_copyToggleBit			;
+_toggleWasLow						;
+	btfsc	RC5H,5					;
+	bsf		RC5_TOGGLED				;
 _copyToggleBit
-	bcf		RC5_TOGGLE			;
-	btfsc	RC5H,5				;set toggle flag to togglebits status
-	bsf		RC5_TOGGLE			;
+	bcf		RC5_TOGGLE				;
+	btfsc	RC5H,5					;set toggle flag to togglebits status
+	bsf		RC5_TOGGLE				;
 
-	btfsc	RC5_FIRST			;if this is the first valid command
-	bsf		RC5_TOGGLED			;force "toggled" flag
-	bcf		RC5_FIRST			;clear the "first" flag
+	btfsc	RC5_FIRST				;if this is the first valid command
+	bsf		RC5_TOGGLED				;force "toggled" flag
+	bcf		RC5_FIRST				;clear the "first" flag
 
 _resetRC5:
-	bcf		RC5_RECEIVED		;clear "received" flag
-	bcf		INTCON,INTF			;clear RB0 interrupt flag
-	bsf		INTCON,INTE			;enable RB0 interrupt
+	bcf		RC5_RECEIVED			;clear "received" flag
+	bcf		INTCON,INTF				;clear RB0 interrupt flag
+;	bsf		INTCON,INTE				;enable RB0 interrupt
+	bcf		RC5_STARTED
 	return
 
 
@@ -1320,19 +1494,20 @@ displayAction:
 	movlw	.0
 	call	cursor_pos_line1
 
-	movlw	0x00				;send "play" to LCD (see LCD_stings.asm)
+	movlw	0x00				;send "Play" to LCD (see LCD_stings.asm)
 	btfsc	PAUSED
-	movlw	0x05				;send "pause" to LCD (see LCD_stings.asm)
+	movlw	0x05				;send "Pause" to LCD (see LCD_stings.asm)
 	call	displayString
 
 	btfss	INTROSCAN
-	goto	_displayRepeat
+	goto	_skipDisplayIntro
+
 	movlw	' '
 	call	lcd_character
 	movlw	0x1E				;send "intro" to LCD (see LCD_stings.asm)
 	call	displayString
 
-_displayRepeat:
+_skipDisplayIntro:
 	btfss	REPEAT
 	return
 	movlw	.14
@@ -1492,6 +1667,8 @@ _found:
 
 _foundPause:
 	bsf		PAUSED
+	btfsc	PROGRAM
+	goto	_playNextTitle
 	btfss	PLAYING
 	goto	_playTitle
 	goto	displayAction
@@ -1499,6 +1676,8 @@ _foundPause:
 
 _foundPauseReleased:
 	bcf		PAUSED
+	btfsc	PROGRAM
+	return
 	goto	displayAction	
 ;	return
 
@@ -1507,7 +1686,7 @@ setStopped:						;DSA response opcode 02h
 	bcf		PAUSED
 	bcf		INTROSCAN
 	bcf		REPEAT
-;	bcf		LED_REPEAT	
+	bcf		PROGRAM	
 	bcf		SHUFFLE
 	movfw	MIN_TITLE
 	movwf	SET_TITLE
@@ -1549,6 +1728,23 @@ setActualTitle:					;DSA response opcode 10h
 ;	return
 
 _setActualTitle:
+	btfss	PROGRAM
+	goto	_setActualTitleNow	
+	movfw	SET_TITLE
+	subwf	DSA_RESPONSE_PARAM,W
+	btfsc	STATUS,Z
+	goto	_setActualTitleNow
+
+	movlw	.6
+	call	cursor_pos_line2
+	movfw	DSA_RESPONSE_PARAM
+	bcf		LEADINGZERO			;do not display leading zero
+	call	displayNumber
+
+	incf	PROG_POINTER,F
+	goto	_playTitle
+
+_setActualTitleNow:
 	movfw	DSA_RESPONSE_PARAM
 	movwf	ACTUAL_TITLE
 	movwf	SET_TITLE
@@ -1736,7 +1932,8 @@ _commandTable:
 	retlw	.38
 	retlw	.39
 	retlw	.40
-	retlw	.41
+	retlw	.41					;
+;	goto	programDisc			;RC5 command PROG (41)
 	retlw	.42
 	goto	introScan			;RC5 command SCAN (43)
 	retlw	.44

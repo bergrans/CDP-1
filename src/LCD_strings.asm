@@ -3,7 +3,7 @@
 ; Filenaam: LCD_strings.asm     (version for MPASM)                           *
 ;******************************************************************************
 ;
-;   LAST MODIFICATION:  10.16.2006
+;   LAST MODIFICATION:  01.12.2006
 ;
 ;******************************************************************************
 ;   VERSION HISTORY                                                           *
@@ -66,6 +66,7 @@ string_table
 	dt	"Opening^"				;0x56
 	dt	"Closing^"				;0x5E
 	dt	"Set DAC mode:^"		;0x66
+	dt	"Program^"				;0x74
 
 displayString:
 	GLOBAL	displayString
